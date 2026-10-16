@@ -169,6 +169,17 @@ def get_export_name_addr_list(e):
     return out
 
 
+def get_dll_name(e):
+    """
+    Returns a non canonical name of a given dll pe instance
+
+    @e: PE instance
+    """
+
+    if e.DirExport.expdesc is None:
+        return None
+    return e.DirExport.dlldescname.name_value
+
 def vm_load_pe(vm, fdata, align_s=True, load_hdr=True, name="", winobjs=None, **kargs):
     """Load a PE in memory (@vm) from a data buffer @fdata
     @vm: VmMngr instance
@@ -191,7 +202,7 @@ def vm_load_pe(vm, fdata, align_s=True, load_hdr=True, name="", winobjs=None, **
         if section.addr & 0xFFF:
             aligned = False
             break
-
+    print(name, hex(pe.NThdr.ImageBase))
     if aligned:
         # Loader NT header
         if load_hdr:

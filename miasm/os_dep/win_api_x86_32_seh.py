@@ -27,11 +27,11 @@ from miasm.loader import pe_init
 
 from miasm.jitter.csts import PAGE_READ, PAGE_WRITE
 from miasm.core.utils import pck32
+from miasm.core.utils import pck64
 import miasm.arch.x86.regs as x86_regs
+from miasm.jitter.loader.pe import get_dll_name
+from miasm.os_dep import win_64_structs, win_32_structs
 
-from miasm.os_dep.win_32_structs import LdrDataEntry, ListEntry, \
-    TEB, NT_TIB, PEB, PEB_LDR_DATA, ContextException, \
-    EXCEPTION_REGISTRATION_RECORD, EXCEPTION_RECORD
 
 # Constants Windows
 EXCEPTION_BREAKPOINT = 0x80000003
@@ -61,12 +61,15 @@ peb_ldr_data_offset = 0x1ea0
 peb_ldr_data_address = LDR_AD + peb_ldr_data_offset
 
 
-modules_list_offset = 0x1f00
+# modules_list_offset = 0x1f00
+modules_list_offset = 0x2000
 
-InInitializationOrderModuleList_offset = 0x1ee0
+# InInitializationOrderModuleList_offset = 0x1ee0
+InInitializationOrderModuleList_offset = 0x1f00
 InInitializationOrderModuleList_address = LDR_AD + \
     InInitializationOrderModuleList_offset
 
+# InLoadOrderModuleList_offset = 0x1ee0 + \
 InLoadOrderModuleList_offset = 0x1ee0 + \
     MAX_MODULES * 0x1000
 InLoadOrderModuleList_address = LDR_AD + \
@@ -85,383 +88,455 @@ main_pe_name = "c:\\xxx\\toto.exe"
 
 MAX_SEH = 5
 
-
-def build_teb(jitter, teb_address):
-    """
-    Build TEB information using following structure:
-
-    @jitter: jitter instance
-    @teb_address: the TEB address
-    """
-
-    # Only allocate space for ExceptionList/ProcessEnvironmentBlock/Self
-    jitter.vm.add_memory_page(
-        teb_address,
-        PAGE_READ | PAGE_WRITE,
-        b"\x00" * NT_TIB.get_offset("StackBase"),
-        "TEB.NtTib.ExceptionList"
-    )
-    jitter.vm.add_memory_page(
-        teb_address + NT_TIB.get_offset("Self"),
-        PAGE_READ | PAGE_WRITE,
-        b"\x00" * (NT_TIB.sizeof() - NT_TIB.get_offset("Self")),
-        "TEB.NtTib.Self"
-    )
-    jitter.vm.add_memory_page(
-        teb_address + TEB.get_offset("ProcessEnvironmentBlock"),
-        PAGE_READ | PAGE_WRITE,
-        b"\x00" * (
-            TEB.get_offset("LastErrorValue") -
-            TEB.get_offset("ProcessEnvironmentBlock")
-        ),
-        "TEB.ProcessEnvironmentBlock"
-    )
-    Teb = TEB(jitter.vm, teb_address)
-    Teb.NtTib.ExceptionList = DEFAULT_SEH
-    Teb.NtTib.Self = teb_address
-    Teb.ProcessEnvironmentBlock = peb_address
-
-def build_peb(jitter, peb_address):
-    """
-    Build PEB information using following structure:
-
-    @jitter: jitter instance
-    @peb_address: the PEB address
-    """
-
-    if main_pe:
-        offset, length = 8, 4
-    else:
-        offset, length = 0xC, 0
-    length += 4
-
-    jitter.vm.add_memory_page(
-        peb_address + offset,
-        PAGE_READ | PAGE_WRITE,
-        b"\x00" * length,
-        "PEB + 0x%x" % offset
-    )
-
-    Peb = PEB(jitter.vm, peb_address)
-    if main_pe:
-        Peb.ImageBaseAddress = main_pe.NThdr.ImageBase
-    Peb.Ldr = peb_ldr_data_address
-
-
-def build_ldr_data(jitter, modules_info):
-    """
-    Build Loader information using following structure:
-
-    +0x000 Length                          : Uint4B
-    +0x004 Initialized                     : UChar
-    +0x008 SsHandle                        : Ptr32 Void
-    +0x00c InLoadOrderModuleList           : _LIST_ENTRY
-    +0x014 InMemoryOrderModuleList         : _LIST_ENTRY
-    +0x01C InInitializationOrderModuleList         : _LIST_ENTRY
-    # dummy dll base
-    +0x024 DllBase : Ptr32 Void
-
-    @jitter: jitter instance
-    @modules_info: LoadedModules instance
-
-    """
-    # ldr offset pad
-    offset = 0xC
-    addr = LDR_AD + peb_ldr_data_offset
-    ldrdata = PEB_LDR_DATA(jitter.vm, addr)
-
-    main_pe = modules_info.name2module.get(main_pe_name, None)
-    ntdll_pe = modules_info.name2module.get("ntdll.dll", None)
-
-
-    size = 0
-    if main_pe:
-        size += ListEntry.sizeof() * 2
-        main_addr_entry = modules_info.module2entry[main_pe]
-    if ntdll_pe:
-        size += ListEntry.sizeof()
-        ntdll_addr_entry = modules_info.module2entry[ntdll_pe]
-
-    jitter.vm.add_memory_page(
-        addr + offset,
-        PAGE_READ | PAGE_WRITE,
-        b"\x00" * size,
-        "Loader struct"
-    )  # (ldrdata.get_size() - offset))
-
-    last_module = modules_info.module2entry[
-        modules_info.modules[-1]]
-
-    if main_pe:
-        ldrdata.InLoadOrderModuleList.flink = main_addr_entry
-        ldrdata.InLoadOrderModuleList.blink = last_module
-
-
-        ldrdata.InMemoryOrderModuleList.flink = main_addr_entry + \
-            LdrDataEntry.get_type().get_offset("InMemoryOrderLinks")
-        ldrdata.InMemoryOrderModuleList.blink = last_module + \
-            LdrDataEntry.get_type().get_offset("InMemoryOrderLinks")
-    if ntdll_pe:
-        ldrdata.InInitializationOrderModuleList.flink = ntdll_addr_entry + \
-            LdrDataEntry.get_type().get_offset("InInitializationOrderLinks")
-        ldrdata.InInitializationOrderModuleList.blink = last_module + \
-                LdrDataEntry.get_type().get_offset("InInitializationOrderLinks")
-
-    # Add dummy dll base
-    jitter.vm.add_memory_page(peb_ldr_data_address + 0x24,
-                              PAGE_READ | PAGE_WRITE, pck32(0),
-                              "Loader struct dummy dllbase")
-
-
-class LoadedModules(object):
-
-    """Class representing modules in memory"""
-
-    def __init__(self):
-        self.modules = []
-        self.name2module = {}
-        self.module2entry = {}
-        self.module2name = {}
-
-    def add(self, name, module, module_entry):
-        """Track a new module
-        @name: module name (with extension)
-        @module: module object
-        @module_entry: address of the module entry
-        """
-
-        self.modules.append(module)
-        self.name2module[name] = module
-        self.module2entry[module] = module_entry
-        self.module2name[module] = name
-
-    def __repr__(self):
-        return "\n".join(str(x) for x in viewitems(self.name2module))
-
-
-def create_modules_chain(jitter, name2module):
-    """
-    Create the modules entries. Those modules are not linked in this function.
-
-    @jitter: jitter instance
-    @name2module: dict containing association between name and its pe instance
-    """
-
-    modules_info = LoadedModules()
-    base_addr = LDR_AD + modules_list_offset  # XXXX
-    offset_name = 0x500
-    offset_path = 0x600
-
-    out = ""
-    for i, (fname, pe_obj) in enumerate(viewitems(name2module), 1):
-        if pe_obj is None:
-            log.warning("Unknown module: omitted from link list (%r)",
-                        fname)
-            continue
-        addr = base_addr + i * 0x1000
-        bpath = fname.replace('/', '\\')
-        bname_str = os.path.split(fname)[1].lower()
-        bname_unicode = bname_str.encode("utf-16le")
-        log.info("Add module %x %r", pe_obj.NThdr.ImageBase, bname_str)
-
-        modules_info.add(bname_str, pe_obj, addr)
-
-        # Allocate a partial LdrDataEntry (0-Flags)
-        jitter.vm.add_memory_page(
-            addr,
-            PAGE_READ | PAGE_WRITE,
-            b"\x00" * LdrDataEntry.get_offset("Flags"),
-            "Module info %r" % bname_str
-        )
-
-        LdrEntry = LdrDataEntry(jitter.vm, addr)
-
-        LdrEntry.DllBase = pe_obj.NThdr.ImageBase
-        LdrEntry.EntryPoint = pe_obj.Opthdr.AddressOfEntryPoint
-        LdrEntry.SizeOfImage = pe_obj.NThdr.sizeofimage
-        LdrEntry.FullDllName.length = len(bname_unicode)
-        LdrEntry.FullDllName.maxlength = len(bname_unicode) + 2
-        LdrEntry.FullDllName.data = addr + offset_path
-        LdrEntry.BaseDllName.length = len(bname_unicode)
-        LdrEntry.BaseDllName.maxlength = len(bname_unicode) + 2
-        LdrEntry.BaseDllName.data = addr + offset_name
-
-        jitter.vm.add_memory_page(
-            addr + offset_name,
-            PAGE_READ | PAGE_WRITE,
-            bname_unicode + b"\x00" * 2,
-            "Module name %r" % bname_str
-        )
-
-        if isinstance(bpath, bytes):
-            bpath = bpath.decode('utf8')
-        bpath_unicode = bpath.encode('utf-16le')
-        jitter.vm.add_memory_page(
-            addr + offset_path,
-            PAGE_READ | PAGE_WRITE,
-            bpath_unicode + b"\x00" * 2,
-            "Module path %r" % bname_str
-        )
-
-    return modules_info
-
-
-def set_link_list_entry(jitter, loaded_modules, modules_info, offset):
-    for i, module in enumerate(loaded_modules):
-        cur_module_entry = modules_info.module2entry[module]
-        prev_module = loaded_modules[(i - 1) % len(loaded_modules)]
-        next_module = loaded_modules[(i + 1) % len(loaded_modules)]
-        prev_module_entry = modules_info.module2entry[prev_module]
-        next_module_entry = modules_info.module2entry[next_module]
-        if i == 0:
-            prev_module_entry = peb_ldr_data_address + 0xC
-        if i == len(loaded_modules) - 1:
-            next_module_entry = peb_ldr_data_address + 0xC
-
-        list_entry = ListEntry(jitter.vm, cur_module_entry + offset)
-        list_entry.flink = next_module_entry + offset
-        list_entry.blink = prev_module_entry + offset
-
-
-
-def fix_InLoadOrderModuleList(jitter, modules_info):
-    """Fix InLoadOrderModuleList double link list. First module is the main pe,
-    then ntdll, kernel32.
-
-    @jitter: the jitter instance
-    @modules_info: the LoadedModules instance
-    """
-
-    log.debug("Fix InLoadOrderModuleList")
-    main_pe = modules_info.name2module.get(main_pe_name, None)
-    kernel32_pe = modules_info.name2module.get("kernel32.dll", None)
-    ntdll_pe = modules_info.name2module.get("ntdll.dll", None)
-    special_modules = [main_pe, kernel32_pe, ntdll_pe]
-    if not all(special_modules):
-        log.warn(
-            'No main pe, ldr data will be unconsistant %r', special_modules)
-        loaded_modules = modules_info.modules
-    else:
-        loaded_modules = [module for module in modules_info.modules
-                          if module not in special_modules]
-        loaded_modules[0:0] = [main_pe]
-        loaded_modules[1:1] = [ntdll_pe]
-        loaded_modules[2:2] = [kernel32_pe]
-
-    set_link_list_entry(jitter, loaded_modules, modules_info, 0x0)
-
-
-def fix_InMemoryOrderModuleList(jitter, modules_info):
-    """Fix InMemoryOrderLinks double link list. First module is the main pe,
-    then ntdll, kernel32.
-
-    @jitter: the jitter instance
-    @modules_info: the LoadedModules instance
-    """
-
-    log.debug("Fix InMemoryOrderModuleList")
-    main_pe = modules_info.name2module.get(main_pe_name, None)
-    kernel32_pe = modules_info.name2module.get("kernel32.dll", None)
-    ntdll_pe = modules_info.name2module.get("ntdll.dll", None)
-    special_modules = [main_pe, kernel32_pe, ntdll_pe]
-    if not all(special_modules):
-        log.warn('No main pe, ldr data will be unconsistant')
-        loaded_modules = modules_info.modules
-    else:
-        loaded_modules = [module for module in modules_info.modules
-                          if module not in special_modules]
-        loaded_modules[0:0] = [main_pe]
-        loaded_modules[1:1] = [ntdll_pe]
-        loaded_modules[2:2] = [kernel32_pe]
-
-    set_link_list_entry(jitter, loaded_modules, modules_info, 0x8)
-
-
-def fix_InInitializationOrderModuleList(jitter, modules_info):
-    """Fix InInitializationOrderModuleList double link list. First module is the
-    ntdll, then kernel32.
-
-    @jitter: the jitter instance
-    @modules_info: the LoadedModules instance
-
-    """
-
-    log.debug("Fix InInitializationOrderModuleList")
-    main_pe = modules_info.name2module.get(main_pe_name, None)
-    kernel32_pe = modules_info.name2module.get("kernel32.dll", None)
-    ntdll_pe = modules_info.name2module.get("ntdll.dll", None)
-    special_modules = [main_pe, kernel32_pe, ntdll_pe]
-    if not all(special_modules):
-        log.warn('No main pe, ldr data will be unconsistant')
-        loaded_modules = modules_info.modules
-    else:
-        loaded_modules = [module for module in modules_info.modules
-                          if module not in special_modules]
-        loaded_modules[0:0] = [ntdll_pe]
-        loaded_modules[1:1] = [kernel32_pe]
-
-    set_link_list_entry(jitter, loaded_modules, modules_info, 0x10)
-
-
-def add_process_env(jitter):
-    """
-    Build a process environment structure
-    @jitter: jitter instance
-    """
-
-    env_unicode = 'ALLUSEESPROFILE=C:\\Documents and Settings\\All Users\x00'.encode('utf-16le')
-    env_unicode += b"\x00" * 0x10
-    jitter.vm.add_memory_page(
-        process_environment_address,
-        PAGE_READ | PAGE_WRITE,
-        env_unicode,
-        "Process environment"
-    )
-    jitter.vm.set_mem(process_environment_address, env_unicode)
-
-
-def add_process_parameters(jitter):
-    """
-    Build a process parameters structure
-    @jitter: jitter instance
-    """
-
-    o = b""
-    o += pck32(0x1000)  # size
-    o += b"E" * (0x48 - len(o))
-    o += pck32(process_environment_address)
-    jitter.vm.add_memory_page(
-        process_parameters_address,
-        PAGE_READ | PAGE_WRITE,
-        o, "Process parameters"
-    )
-
-
 # http://blog.fireeye.com/research/2010/08/download_exec_notes.html
 seh_count = 0
 
 
-def init_seh(jitter):
+class WinEnv:
     """
-    Build the modules entries and create double links
-    @jitter: jitter instance
+    Build the Windows process execution context for the jitter
     """
 
-    global seh_count
-    seh_count = 0
-    tib_ad = jitter.cpu.get_segm_base(jitter.cpu.FS)
-    build_teb(jitter, tib_ad)
-    build_peb(jitter, peb_address)
+    def __init__(self, arch, jitter):
+        self.arch = arch
 
-    modules_info = create_modules_chain(jitter, name2module)
-    fix_InLoadOrderModuleList(jitter, modules_info)
-    fix_InMemoryOrderModuleList(jitter, modules_info)
-    fix_InInitializationOrderModuleList(jitter, modules_info)
+        if arch == "x86_64":
+            self.structs = win_64_structs
+            self.ptr_size = 8
+            self.pck = pck64
+            self.tib_ad = jitter.cpu.get_segm_base(jitter.cpu.GS)
+        else: 
+            # x86
+            self.structs = win_32_structs
+            self.ptr_size = 4
+            self.pck = pck32
+            self.tib_ad = jitter.cpu.get_segm_base(jitter.cpu.FS)
 
-    build_ldr_data(jitter, modules_info)
-    add_process_env(jitter)
-    add_process_parameters(jitter)
+        self.TEB = self.structs.TEB
+        self.PEB = self.structs.PEB
+        self.NT_TIB = self.structs.NT_TIB
+        self.PEB_LDR_DATA = self.structs.PEB_LDR_DATA
+        self.LdrDataEntry = self.structs.LdrDataEntry
+        self.ListEntry = self.structs.ListEntry
+        self.EXCEPTION_RECORD = self.structs.EXCEPTION_RECORD
+        self.EXCEPTION_REGISTRATION_RECORD = (
+            self.structs.EXCEPTION_REGISTRATION_RECORD
+        )
 
+        self.LOAD_ORDER = self.LdrDataEntry.get_type().get_offset(
+            "InLoadOrderLinks"
+        )
+        self.MEMORY_ORDER = self.LdrDataEntry.get_type().get_offset(
+            "InMemoryOrderLinks"
+        )
+        self.INIT_ORDER = self.LdrDataEntry.get_type().get_offset(
+            "InInitializationOrderLinks"
+        )
+
+    def build_teb(self, jitter, teb_address):
+        """
+        Build TEB information using following structure:
+
+        @jitter: jitter instance
+        @teb_address: the TEB address
+        """
+
+        NT_TIB = self.NT_TIB
+        TEB = self.TEB
+
+
+        jitter.vm.add_memory_page(
+            teb_address,
+            PAGE_READ | PAGE_WRITE,
+            b"\x00" * NT_TIB.sizeof(),
+            "TEB.NtTib"
+        )
+
+        # Only allocate space for ExceptionList/ProcessEnvironmentBlock/Self
+        # jitter.vm.add_memory_page(
+        #     teb_address + NT_TIB.get_offset("Self"),
+        #     PAGE_READ | PAGE_WRITE,
+        #     b"\x00" * (NT_TIB.sizeof() - NT_TIB.get_offset("Self")),
+        #     "TEB.NtTib.Self"
+        # )
+
+        jitter.vm.add_memory_page(
+            teb_address + TEB.get_offset("ProcessEnvironmentBlock"),
+            PAGE_READ | PAGE_WRITE,
+            b"\x00" * (
+                TEB.get_offset("LastErrorValue") -
+                TEB.get_offset("ProcessEnvironmentBlock")
+            ),
+            "TEB.ProcessEnvironmentBlock"
+        )
+
+        Teb = TEB(jitter.vm, teb_address)
+        Teb.NtTib.ExceptionList = DEFAULT_SEH
+        Teb.NtTib.Self = teb_address
+        Teb.ProcessEnvironmentBlock = peb_address
+
+    def build_peb(self, jitter, peb_address):
+        """
+        Build PEB information using following structure:
+
+        @jitter: jitter instance
+        @peb_address: the PEB address
+        """
+
+        PEB = self.PEB
+
+        if main_pe:
+            # offset ImageBaseAddress
+            offset, length = PEB.get_offset("ImageBaseAddress"), self.ptr_size
+            # x86 : 0x8, 0x4 
+            # x86_64 : 0x10, 0x8 
+        else:
+            # offset Ldr
+            offset, length = PEB.get_offset("Ldr"), 0
+            # x86 : 0xc, 0x0
+            # x86_64 : 0x18, 0x0 
+
+        length += self.ptr_size
+
+
+        jitter.vm.add_memory_page(
+            peb_address + offset,
+            PAGE_READ | PAGE_WRITE,
+            b"\x00" * length,
+            "PEB + 0x%x" % offset
+        )
+
+        Peb = PEB(jitter.vm, peb_address)
+        if main_pe:
+            Peb.ImageBaseAddress = main_pe.NThdr.ImageBase
+        Peb.Ldr = peb_ldr_data_address
+
+
+    def init_head_list(self, head, first_entry, last_entry, offset):
+        """
+        Initiate a module list
+
+        @head : head of a LIST_ENTRY
+        @first_entry : address of the first module
+        @last_entry : address of the last module
+        @offset : offset of the module list link in an LdrDataEntry
+        """
+        head.flink = first_entry + offset
+        head.blink = last_entry + offset
+
+    def build_ldr_data(self, jitter, modules_info):
+        """
+        Build Loader information using following structure:
+
+        +0x000 Length                          : Uint4B
+        +0x004 Initialized                     : UChar
+        +0x008 SsHandle                        : Ptr32 Void
+        +0x00c InLoadOrderModuleList           : _LIST_ENTRY
+        +0x014 InMemoryOrderModuleList         : _LIST_ENTRY
+        +0x01C InInitializationOrderModuleList         : _LIST_ENTRY
+        +0x024 EntryInProgress                 : Ptr32 Void
+
+        64 bits : 
+        +0x000 Length                          : Uint4B
+        +0x004 Initialized                     : UChar
+        +0x008 SsHandle                        : Ptr64 Void
+        +0x010 InLoadOrderModuleList           : _LIST_ENTRY
+        +0x020 InMemoryOrderModuleList         : _LIST_ENTRY
+        +0x030 InInitializationOrderModuleList         : _LIST_ENTRY
+        +0x040 EntryInprogress                 : Ptr64 Void
+        
+        @jitter: jitter instance
+        @modules_info: LoadedModules instance
+        """
+
+        PEB_LDR_DATA = self.PEB_LDR_DATA
+
+        # ldr offset pad
+        offset = PEB_LDR_DATA.get_offset("InLoadOrderModuleList") 
+        ldrdata = PEB_LDR_DATA(jitter.vm, peb_ldr_data_address)
+
+        main_pe = modules_info.name2module.get(main_pe_name, None)
+        ntdll_pe = modules_info.name2module.get("ntdll.dll", None)
+
+        if main_pe == None:
+            log.warn("No main PE")
+        if ntdll_pe == None:
+            log.warn("ntdll.dll is needed to create an InInitializationOrderModuleList")
+
+
+        size = self.ListEntry.sizeof() * 3
+        main_addr_entry = modules_info.module2entry[main_pe]
+        ntdll_addr_entry = modules_info.module2entry[ntdll_pe]
+
+        # #old logic
+        # size = 0
+        # if main_pe:
+        #     size += ListEntry.sizeof() * 2
+        #     main_addr_entry = modules_info.module2entry[main_pe]
+        # if ntdll_pe:
+        #     size += ListEntry.sizeof()
+        #     ntdll_addr_entry = modules_info.module2entry[ntdll_pe]
+
+        jitter.vm.add_memory_page(
+            peb_ldr_data_address + offset,
+            PAGE_READ | PAGE_WRITE,
+            b"\x00" * size,
+            "Loader struct"
+        )
+
+        last_module = modules_info.module2entry[
+            modules_info.modules[-1]]
+
+        self.init_head_list(ldrdata.InLoadOrderModuleList, main_addr_entry, last_module, self.LOAD_ORDER)
+        self.init_head_list(ldrdata.InMemoryOrderModuleList, main_addr_entry, last_module, self.MEMORY_ORDER)
+        self.init_head_list(ldrdata.InInitializationOrderModuleList, ntdll_addr_entry, last_module, self.INIT_ORDER)
+        
+        jitter.vm.add_memory_page(peb_ldr_data_address + PEB_LDR_DATA.get_offset("EntryInProgress"),
+                                PAGE_READ | PAGE_WRITE, self.pck(0),
+                                "Loader struct dummy dllbase")
+
+
+    class LoadedModules(object):
+
+        """Class representing modules in memory"""
+
+        def __init__(self):
+            self.modules = []
+            self.name2module = {}
+            self.module2entry = {}
+            self.module2name = {}
+
+        def add(self, name, module, module_entry):
+            """Track a new module
+            @name: module name (with extension)
+            @module: module object
+            @module_entry: address of the module entry
+            """
+
+            self.modules.append(module)
+            self.name2module[name] = module
+            self.module2entry[module] = module_entry
+            self.module2name[module] = name
+
+        def __repr__(self):
+            return "\n".join(str(x) for x in viewitems(self.name2module))
+
+
+    def create_modules_chain(self, jitter, name2module):
+        """
+        Create the modules entries. Those modules are not linked in this function.
+
+        @jitter: jitter instance
+        @name2module: dict containing association between name and its pe instance
+        """
+
+        LdrDataEntry = self.LdrDataEntry
+
+        modules_info = self.LoadedModules()
+        base_addr = LDR_AD + modules_list_offset  # XXXX
+        offset_name = 0x500
+        offset_path = 0x600
+
+        out = ""
+        for i, (fname, pe_obj) in enumerate(viewitems(name2module), 1):
+            if pe_obj is None:
+                log.warning("Unknown module: omitted from link list (%r)",
+                            fname)
+                continue
+            addr = base_addr + i * 0x1000
+            bpath = fname.replace('/', '\\')
+
+            # bname_str = os.path.split(fname)[1].lower()
+            name_dll = get_dll_name(pe_obj)
+
+            # LdrDataEntry.BaseDllName->Buffer is either filled with the dll name imported 
+            # by the main PE or the name used in a LoadLibrary call
+
+            # get_dll_name() returns the name "exported" by the dll's PE but it seems that
+            # it has the same casing as the name imported by the main PE
+
+            if name_dll == None :
+                # the PE has no export meaning it is not a dll
+                bname_str = os.path.split(fname)[1].lower()
+            else :
+                bname_str = name_dll.decode()
+
+            bname_unicode = bname_str.encode("utf-16le")
+            log.info("Add module %x %r", pe_obj.NThdr.ImageBase, bname_str)
+
+            modules_info.add(bname_str, pe_obj, addr)
+            print(bname_str, hex(addr))
+
+            # Allocate a partial LdrDataEntry (0-Flags)
+            jitter.vm.add_memory_page(
+                addr,
+                PAGE_READ | PAGE_WRITE,
+                b"\x00" * LdrDataEntry.get_offset("Flags"),
+                "Module info %r" % bname_str
+            )
+
+            LdrEntry = self.LdrDataEntry(jitter.vm, addr)
+
+            LdrEntry.DllBase = pe_obj.NThdr.ImageBase
+            LdrEntry.EntryPoint = pe_obj.Opthdr.AddressOfEntryPoint
+            LdrEntry.SizeOfImage = pe_obj.NThdr.sizeofimage
+            LdrEntry.FullDllName.length = len(bname_unicode)
+            LdrEntry.FullDllName.maxlength = len(bname_unicode) + 2
+            LdrEntry.FullDllName.data = addr + offset_path
+            LdrEntry.BaseDllName.length = len(bname_unicode)
+            LdrEntry.BaseDllName.maxlength = len(bname_unicode) + 2
+            LdrEntry.BaseDllName.data = addr + offset_name
+
+            jitter.vm.add_memory_page(
+                addr + offset_name,
+                PAGE_READ | PAGE_WRITE,
+                bname_unicode + b"\x00" * 2,
+                "Module name %r" % bname_str
+            )
+
+            if isinstance(bpath, bytes):
+                bpath = bpath.decode('utf8')
+            bpath_unicode = bpath.encode('utf-16le')
+            jitter.vm.add_memory_page(
+                addr + offset_path,
+                PAGE_READ | PAGE_WRITE,
+                bpath_unicode + b"\x00" * 2,
+                "Module path %r" % bname_str
+            )
+
+        return modules_info
+
+
+    def set_link_list_entry(self, jitter, loaded_modules, modules_info, offset):
+        PEB_LDR_DATA = self.PEB_LDR_DATA
+
+        for i, module in enumerate(loaded_modules):
+            cur_module_entry = modules_info.module2entry[module]
+            prev_module = loaded_modules[(i - 1) % len(loaded_modules)]
+            next_module = loaded_modules[(i + 1) % len(loaded_modules)]
+            prev_module_entry = modules_info.module2entry[prev_module]
+            next_module_entry = modules_info.module2entry[next_module]
+            if i == 0:
+                prev_module_entry = peb_ldr_data_address + PEB_LDR_DATA.get_offset("InLoadOrderModuleList")
+            if i == len(loaded_modules) - 1:
+                next_module_entry = peb_ldr_data_address + PEB_LDR_DATA.get_offset("InLoadOrderModuleList")
+
+            list_entry = self.ListEntry(jitter.vm, cur_module_entry + offset)
+            list_entry.flink = next_module_entry + offset
+            list_entry.blink = prev_module_entry + offset
+
+
+    def fix_module_list_order(self, jitter, modules_info, order, offset):
+        """Fix InXXXOrderModuleList double link list. First module is the main pe,
+        then ntdll, kernel32 except it's an InInitializationOrderModuleList
+
+        @jitter: the jitter instance
+        @modules_info: the LoadedModules instance
+        @order : specify the order in which the modules are linked
+        @offset : offset of the module list link in an LdrDataEntry
+        """
+
+        log.debug("Fix In%sOrderModuleList", order)
+        main_pe = modules_info.name2module.get(main_pe_name, None)
+        kernel32_pe = modules_info.name2module.get("kernel32.dll", None)
+        ntdll_pe = modules_info.name2module.get("ntdll.dll", None)
+        special_modules = [main_pe, kernel32_pe, ntdll_pe]
+        if not all(special_modules):
+            log.warn(
+                'No main pe, ldr data will be unconsistant %r', special_modules)
+            loaded_modules = modules_info.modules
+        else:
+            loaded_modules = [module for module in modules_info.modules
+                            if module not in special_modules]
+            if order == "Initialization":
+                loaded_modules[0:0] = [ntdll_pe]
+                loaded_modules[1:1] = [kernel32_pe]
+            else : 
+                loaded_modules[0:0] = [main_pe]
+                loaded_modules[1:1] = [ntdll_pe]
+                loaded_modules[2:2] = [kernel32_pe]
+        
+        self.set_link_list_entry(jitter, loaded_modules, modules_info, offset)
+
+
+    def add_process_env(self, jitter):
+        """
+        Build a process environment structure
+        @jitter: jitter instance
+        """
+
+        env_unicode = 'ALLUSEESPROFILE=C:\\Documents and Settings\\All Users\x00'.encode('utf-16le')
+        env_unicode += b"\x00" * self.PEB.get_offset("ProcessParameters")
+        jitter.vm.add_memory_page(
+            process_environment_address,
+            PAGE_READ | PAGE_WRITE,
+            env_unicode,
+            "Process environment"
+        )
+        jitter.vm.set_mem(process_environment_address, env_unicode)
+
+    def add_process_parameters(self, jitter):
+        """
+        Build a process parameters structure
+        @jitter: jitter instance
+
+        _RTL_USER_PROCESS_PARAMETERS 
+        +0x48 : void* Environment
+
+        64 bits :
+        +0x80 : void* Environment
+        """
+
+        o = b""
+        o += self.pck(0x1000)  # size
+        if self.arch=="x86_64": 
+            o += b"E" * (0x80 - len(o))
+        else: 
+            o += b"E" * (0x48 - len(o))
+
+        o += self.pck(process_environment_address)
+        
+        # PEB -> ProcessParameters -> RTL_USER_PROCESS_PARAMETERS -> Environment -> ALLUSEESPROFILE=...\0\0
+        jitter.vm.add_memory_page(
+            process_parameters_address,
+            PAGE_READ | PAGE_WRITE,
+            o, "Process parameters"
+        )
+
+
+    def init_seh(self, jitter):
+
+        global seh_count
+        seh_count = 0
+
+        self.build_teb(jitter, self.tib_ad)
+        self.build_peb(jitter, peb_address)
+        modules_info = self.create_modules_chain(jitter, name2module)
+
+        self.fix_module_list_order(
+            jitter,
+            modules_info,
+            "Load",
+            self.LOAD_ORDER
+        )
+
+        self.fix_module_list_order(
+            jitter,
+            modules_info,
+            "Memory",
+            self.MEMORY_ORDER
+        )
+
+        self.fix_module_list_order(
+            jitter,
+            modules_info,
+            "Initialization",
+            self.INIT_ORDER
+        )
+
+        self.build_ldr_data(jitter, modules_info)
+        self.add_process_env(jitter)
+        self.add_process_parameters(jitter)
 
 
 def regs2ctxt(jitter, context_address):
@@ -641,6 +716,17 @@ def dump_seh(jitter):
         cur_seh_ptr = err.Next
         loop += 1
 
+
+def set_win_gs_0(jitter, gs=4):
+    """
+    Set GS segment selector and create its corresponding segment
+    @jitter: jitter instance
+    @fs: segment selector value
+    """
+    jitter.cpu.GS = gs
+    jitter.cpu.set_segm_base(gs, tib_address)
+    segm_to_do = set([x86_regs.GS])
+    return segm_to_do
 
 def set_win_fs_0(jitter, fs=4):
     """

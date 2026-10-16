@@ -78,6 +78,7 @@ class PEB_LDR_DATA(MemStruct):
     +0x00c InLoadOrderModuleList           : _LIST_ENTRY
     +0x014 InMemoryOrderModuleList         : _LIST_ENTRY
     +0x01C InInitializationOrderModuleList         : _LIST_ENTRY
+    +0x024 EntryInProgress                  : Ptr32 Void
     """
 
     fields = [
@@ -86,7 +87,8 @@ class PEB_LDR_DATA(MemStruct):
         ("SsHandle", Ptr("<I", Void())),
         ("InLoadOrderModuleList", ListEntry),
         ("InMemoryOrderModuleList", ListEntry),
-        ("InInitializationOrderModuleList", ListEntry)
+        ("InInitializationOrderModuleList", ListEntry),
+        ("EntryInProgress", Ptr("<I", Void()))
     ]
 
 
@@ -100,7 +102,7 @@ class PEB(MemStruct):
     +0x004 Mutant                   : Ptr32 Void
     +0x008 ImageBaseAddress         : Ptr32 Void
     +0x00c Ldr                      : Ptr32 _PEB_LDR_DATA
-    +0x010 processparameter
+    +0x010 ProcessParameters         : Ptr32 Void
     """
 
     fields = [
@@ -111,6 +113,7 @@ class PEB(MemStruct):
         ("Mutant", Ptr("<I", Void())),
         ("ImageBaseAddress", Num("<I")),
         ("Ldr", Ptr("<I", PEB_LDR_DATA)),
+        ("ProcessParameters", Ptr("<I", Void()))
     ]
 
 

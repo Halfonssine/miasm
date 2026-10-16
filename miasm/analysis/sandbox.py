@@ -14,6 +14,9 @@ from miasm.analysis import debugging
 from miasm.jitter.jitload import log_func
 from miasm.core.utils import force_bytes
 
+from miasm.os_dep import win_api_x86_32
+from miasm.os_dep import win_api_x86_32_seh
+
 
 class Sandbox(object):
 
@@ -184,6 +187,7 @@ class Arch(object):
 
 class OS_Win(OS):
     # DLL to import
+
     ALL_IMP_DLL = [
         "ntdll.dll", "kernel32.dll", "user32.dll",
         "ole32.dll", "urlmon.dll",
@@ -191,11 +195,19 @@ class OS_Win(OS):
     ]
     modules_path = "win_dll"
 
+    # ALL_IMP_DLL = [
+    #      "ntdll.dll", "kernel32.dll", "user32.dll", "msvcrt.dll"
+    # ]
+    # modules_path = "win_dll_64"
+
+    # rajout pour abstraire la classe de l'architecture
+    WIN_API = None
+    WIN_SEH = None 
+
     def __init__(self, custom_methods, *args, **kwargs):
         from miasm.jitter.loader.pe import vm_load_pe, vm_load_pe_libs,\
             preload_pe, libimp_pe, vm_load_pe_and_dependencies
-        from miasm.os_dep import win_api_x86_32, win_api_x86_32_seh
-        methods = dict((name, func) for name, func in viewitems(win_api_x86_32.__dict__))
+        methods = dict((name, func) for name, func in viewitems(self.WIN_API.__dict__))
         methods.update(custom_methods)
 
         super(OS_Win, self).__init__(methods, *args, **kwargs)
@@ -203,7 +215,8 @@ class OS_Win(OS):
         # Import manager
         libs = libimp_pe()
         self.libs = libs
-        win_api_x86_32.winobjs.runtime_dll = libs
+        # win_api_x86_32.winobjs.runtime_dll = libs
+        self.WIN_API.winobjs.runtime_dll = libs
 
         self.name2module = {}
         fname_basename = os.path.basename(self.fname).lower()
@@ -215,7 +228,8 @@ class OS_Win(OS):
                 fstream.read(),
                 load_hdr=self.options.load_hdr,
                 name=self.fname,
-                winobjs=win_api_x86_32.winobjs,
+                # winobjs=win_api_x86_32.winobjs,
+                winobjs=self.WIN_API.winobjs,
                 **kwargs
             )
             self.name2module[fname_basename] = self.pe
@@ -230,7 +244,8 @@ class OS_Win(OS):
                     self.ALL_IMP_DLL,
                     libs,
                     self.modules_path,
-                    winobjs=win_api_x86_32.winobjs,
+                    # winobjs=win_api_x86_32.winobjs,
+                    winobjs=self.WIN_API.winobjs,
                     **kwargs
                 )
             )
@@ -246,11 +261,13 @@ class OS_Win(OS):
                 self.name2module,
                 libs,
                 self.modules_path,
-                winobjs=win_api_x86_32.winobjs,
+                # winobjs=win_api_x86_32.winobjs,
+                winobjs=self.WIN_API.winobjs,
                 **kwargs
             )
 
-        win_api_x86_32.winobjs.current_pe = self.pe
+        # win_api_x86_32.winobjs.current_pe = self.pe
+        self.WIN_API.winobjs.current_pe = self.pe
 
         # Fix pe imports
         preload_pe(self.jitter.vm, self.pe, libs)
@@ -260,12 +277,11 @@ class OS_Win(OS):
 
         # Manage SEH
         if self.options.use_windows_structs:
-            win_api_x86_32_seh.main_pe_name = fname_basename
-            win_api_x86_32_seh.main_pe = self.pe
-            win_api_x86_32.winobjs.hcurmodule = self.pe.NThdr.ImageBase
-            win_api_x86_32_seh.name2module = self.name2module
-            win_api_x86_32_seh.set_win_fs_0(self.jitter)
-            win_api_x86_32_seh.init_seh(self.jitter)
+            self.WIN_SEH.main_pe_name = fname_basename
+            self.WIN_SEH.main_pe = self.pe
+            self.WIN_API.winobjs.hcurmodule = self.pe.NThdr.ImageBase
+            self.WIN_SEH.name2module = self.name2module
+            self.init_windows_structure()
 
         self.entry_point = self.pe.rva2virt(
             self.pe.Opthdr.AddressOfEntryPoint)
@@ -281,6 +297,26 @@ class OS_Win(OS):
         parser.add_argument('-r', "--parse-resources",
                             action="store_true", help="Load resources")
 
+#rajout
+class OS_Win_x86_32(OS_Win):
+    WIN_API = win_api_x86_32
+    WIN_SEH = win_api_x86_32_seh
+
+
+    def init_windows_structure(self):
+        self.WIN_SEH.set_win_fs_0(self.jitter)
+        instance = self.WIN_SEH.WinEnv("x86_32", self.jitter)
+        instance.init_seh(self.jitter)
+
+class OS_Win_x86_64(OS_Win):
+    # TODO WIN_API = win_api_x86_64
+    WIN_API = win_api_x86_32
+    WIN_SEH = win_api_x86_32_seh
+
+    def init_windows_structure(self):
+        self.WIN_SEH.set_win_gs_0(self.jitter)
+        instance = self.WIN_SEH.WinEnv("x86_64", self.jitter)
+        instance.init_seh(self.jitter)
 
 class OS_Linux(OS):
 
@@ -506,7 +542,7 @@ class Arch_ppc32(Arch):
 class Arch_ppc32b(Arch_ppc32):
     _ARCH_ = "ppc32b"
 
-class Sandbox_Win_x86_32(Sandbox, Arch_x86_32, OS_Win):
+class Sandbox_Win_x86_32(Sandbox, Arch_x86_32, OS_Win_x86_32):
 
     def __init__(self, loc_db, *args, **kwargs):
         Sandbox.__init__(self, loc_db, *args, **kwargs)
@@ -538,7 +574,7 @@ class Sandbox_Win_x86_32(Sandbox, Arch_x86_32, OS_Win):
         super(self.__class__, self).call(prepare_cb, addr, *args)
 
 
-class Sandbox_Win_x86_64(Sandbox, Arch_x86_64, OS_Win):
+class Sandbox_Win_x86_64(Sandbox, Arch_x86_64, OS_Win_x86_64):
 
     def __init__(self, loc_db, *args, **kwargs):
         Sandbox.__init__(self, loc_db, *args, **kwargs)
