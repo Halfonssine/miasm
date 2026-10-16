@@ -622,10 +622,25 @@ class PE(object):
                 reloc_type, off = reloc.rel
                 if reloc_type == 0 and off == 0:
                     continue
-                if reloc_type != 3:
+                # if reloc_type != 3:
+                #     raise NotImplementedError('Reloc type not supported')
+                # off += rva
+                # value = struct.unpack('I', self.rva.get(off, off + 4))[0]
+                # value += offset
+                # self.rva.set(off, struct.pack('I', value & 0xFFFFFFFF))
+                if reloc_type == 3:
+                    off += rva
+                    value = struct.unpack('I', self.rva.get(off, off + 4))[0]
+                    value += offset
+                    self.rva.set(off, struct.pack('I', value & 0xFFFFFFFF))
+
+                elif reloc_type == 10:
+                    off += rva
+                    value = struct.unpack('Q', self.rva.get(off, off + 8))[0]
+                    value += offset
+                    self.rva.set(off, struct.pack('I', value & 0xFFFFFFFFFFFFFFFF))
+                else:
                     raise NotImplementedError('Reloc type not supported')
-                off += rva
-                value = struct.unpack('I', self.rva.get(off, off + 4))[0]
-                value += offset
-                self.rva.set(off, struct.pack('I', value & 0xFFFFFFFF))
+                
+
         self.NThdr.ImageBase = imgbase

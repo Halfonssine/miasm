@@ -292,6 +292,84 @@ def vm_load_pe(vm, fdata, align_s=True, load_hdr=True, name="", winobjs=None, **
     return pe
 
 
+
+def has_collision(vm, base, size):
+
+    for addr, info in vm.get_all_memory().items():
+        if addr < base + size and addr + info ['size'] > base :
+            return True
+    return False
+
+def pe_mapped_size(pe_obj, load_hdr=True):
+    min_addr = 0 if load_hdr else None
+    max_addr = None
+    data = ""
+
+    for i, section in enumerate(pe_obj.SHList):
+        if i < len(pe_obj.SHList) - 1:
+            section.size = pe_obj.SHList[i + 1].addr - section.addr
+        section.rawsize = section.size
+        section.offset = section.addr
+
+        if min_addr is None or section.addr < min_addr:
+            min_addr = section.addr
+        max_section_len = max(section.size, len(section.data))
+        if max_addr is None or section.addr + max_section_len > max_addr:
+            max_addr = section.addr + max_section_len
+
+    size = max_addr - min_addr
+    # align size
+    # ex if size = 0x1001 then size + 0xfff = 0x2000, 0x2000 & ~0xfff = 0x2000
+    return (size + 0xFFF) & ~0xFFF 
+
+def find_free_vm_addr(vm, size, align=0x1000, start=0x10000000, end=0x7ff00000):
+
+    pages = sorted(vm.get_all_memory().items())
+    candidate = (start + align - 1) & ~(align - 1)
+
+    for addr, info in pages:
+        page_end = addr + info['size']
+        if candidate + size <= addr:
+            break
+        if page_end > candidate:
+            candidate = (page_end + align - 1) & ~(align -1)
+    if candidate + size > end:
+        log.warning('No free space found, risk of collision')
+    return candidate
+
+    
+def vm_load_pe_rebased(vm, fdata, name="", load_hdr=True, **kargs):
+    """vm_load_pe() wrapper to rebase and relocalise addresses in case of
+    overlapping when loading the PE
+    @vm: VmMngr instance
+    @fdata: data buffer to parse
+    """
+
+    pe_obj = pe_init.PE(fdata, **kargs)
+    orig_imgbase = pe_obj.NThdr.ImageBase
+    # Compute the maximum size of the PE instead of using sizeOfImage
+    size = pe_mapped_size(pe_obj, load_hdr=True)
+
+    if not has_collision(vm, orig_imgbase, size):
+        return vm_load_pe(vm, fdata, name=name, load_hdr=load_hdr, **kargs)
+
+    # Find new image base address
+    new_base = find_free_vm_addr(vm, size)
+
+    # Update new base and apply relocations before loading
+    pe_obj.NThdr.ImageBase = new_base
+    pe_obj.reloc_to(new_base)
+
+    # update sections since vm_load_pe() parse the PE and load it using sections
+    for section in pe_obj.SHList:
+        section.data = pe_obj.rva.get(section.addr, section.addr + section.size)
+
+    # rebuild the PE with the new image base and relocated sections before loading
+    fdata_rebased = pe_obj.build_content()
+
+    return vm_load_pe(vm, fdata_rebased, name=name, load_hdr=load_hdr, **kargs)
+
+
 def vm_load_pe_lib(vm, fname_in, libs, lib_path_base, **kargs):
     """Call vm_load_pe on @fname_in and update @libs accordingly
     @vm: VmMngr instance
@@ -306,7 +384,8 @@ def vm_load_pe_lib(vm, fname_in, libs, lib_path_base, **kargs):
 
     fname = os.path.join(lib_path_base, fname_in)
     with open(fname, "rb") as fstream:
-        pe = vm_load_pe(vm, fstream.read(), name=fname_in, **kargs)
+        # pe = vm_load_pe(vm, fstream.read(), name=fname_in, **kargs)
+        pe = vm_load_pe_rebased(vm, fstream.read(), name=fname_in, **kargs)
     libs.add_export_lib(pe, fname_in)
     return pe
 
