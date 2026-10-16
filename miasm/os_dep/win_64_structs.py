@@ -226,3 +226,165 @@ class ContextException(MemStruct):
         ("ss", Num("<I")),
     ]
 
+
+## SEH 64 bits structures
+
+class ExceptionRecord64(MemStruct):
+
+    """
+    LONG ExceptionCode;                                                     //0x0
+    ULONG ExceptionFlags;                                                   //0x4
+    ULONGLONG ExceptionRecord;                                              //0x8
+    ULONGLONG ExceptionAddress;                                             //0x10
+    ULONG NumberParameters;                                                 //0x18
+    ULONG __unusedAlignment;                                                //0x1c
+    ULONGLONG ExceptionInformation[15];                                     //0x20
+    """
+
+    fields = [
+        ("ExceptionCode", Num("<I")),
+        ("ExceptionFlags", Num("<I")),
+        ("ExceptionRecord", Ptr("<Q", Self())),
+        ("ExceptionAddress", Ptr("<Q", Void())),
+        ("NumberParameters", Num("<I")),
+        ("_pad", Num("<I")), 
+        ("ExceptionInformation", Array(Num("<Q"), 15)),
+    ]
+
+class ContextException64(MemStruct):
+    fields = [
+        ("P1Home", Num("<Q")),
+        ("P2Home", Num("<Q")),
+        ("P3Home", Num("<Q")),
+        ("P4Home", Num("<Q")),
+        ("P5Home", Num("<Q")),
+        ("P6Home", Num("<Q")),
+
+        ("ContextFlags", Num("<I")), 
+        ("mxcsr", Num("<I")),
+
+        ("cs", Num("<H")), 
+        ("ds", Num("<H")), 
+        ("es", Num("<H")),
+        ("fs", Num("<H")), 
+        ("gs", Num("<H")), 
+        ("ss", Num("<H")),
+
+        ("eflags", Num("<I")),
+
+        ("dr0", Num("<Q")), 
+        ("dr1", Num("<Q")), 
+        ("dr2", Num("<Q")),
+        ("dr3", Num("<Q")), 
+        ("dr6", Num("<Q")), 
+        ("dr7", Num("<Q")),
+
+        ("rax", Num("<Q")), 
+        ("rcx", Num("<Q")), 
+        ("rdx", Num("<Q")), 
+        ("rbx", Num("<Q")),
+        ("rsp", Num("<Q")), 
+        ("rbp", Num("<Q")), 
+        ("rsi", Num("<Q")), 
+        ("rdi", Num("<Q")),
+
+        ("r8", Num("<Q")), 
+        ("r9", Num("<Q")), 
+        ("r10", Num("<Q")), 
+        ("r11", Num("<Q")),
+        ("r12", Num("<Q")), 
+        ("r13", Num("<Q")), 
+        ("r14", Num("<Q")), 
+        ("r15", Num("<Q")),
+
+        ("rip", Num("<Q")),
+
+        ("FltSave", Array(Num("B"), 512)),
+        ("VectorRegister", Array(Num("B"), 26 * 16)),
+        ("VectorControl", Num("<Q")),
+        ("DebugControl", Num("<Q")),
+        ("LastBranchToRip", Num("<Q")),
+        ("LastBranchFromRip", Num("<Q")),
+        ("LastExceptionToRip", Num("<Q")),
+        ("LastExceptionFromRip", Num("<Q")),
+    ]
+
+class RuntimeFunction(MemStruct):
+    fields = [
+        ("BeginAddress", Num("<I")),
+        ("EndAddress", Num("<I")),
+        ("UnwindData", Num("<I")),
+    ]
+
+#https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64?view=msvc-170
+
+# UNWIND_INFO contains an UnwindCode[CountOfCodes] table and an ExceptionData table of
+# variable sizes. These are manually parsed in win_api_x86_64_seh.py
+
+class UnwindInfoHeader(MemStruct):
+
+    """ 
+    typedef struct _UNWIND_INFO {
+        UBYTE Version;
+        UBYTE Flags;   // UNW_FLAG_EHANDLER, UNW_FLAG_UHANDLER, UNW_FLAG_CHAININFO...
+        UBYTE SizeOfProlog;
+        UBYTE CountOfCodes;
+        UBYTE FrameRegister;
+        UBYTE FrameOffset;
+        UNWIND_CODE UnwindCode[CountOfCodes];
+
+        // variable part : 
+        union {
+            OPTIONAL ULONG ExceptionHandler;
+            OPTIONAL ULONG FunctionEntry;
+        };
+        OPTIONAL ULONG ExceptionData[];
+
+        // or
+        UNWIND_INFO ChainedUnwindInfo
+    } UNWIND_INFO, *PUNWIND_INFO;
+    """
+
+    fields = [
+        ("VersionAndFlags", Num("B")),
+        ("SizeOfProlog", Num("B")),
+        ("CountOfCodes", Num("B")),
+        ("FrameRegisterAndOffset", Num("B")),
+    ]
+
+class UnwindCode(MemStruct):
+    fields = [
+        ("CodeOffset", Num("B")),
+        ("UnwindOpAndInfo", Num("B")),
+    ]
+
+
+# SCOPE_TABLE has a ScopeRecord[Count] table of variable size so only the record
+# type is declared to parse the table
+
+
+class ScopeTableHeader(MemStruct):
+
+    """ 
+    typedef struct _SCOPE_TABLE_AMD64 { 
+        ULONG Count;
+        struct {
+            ULONG BeginAddress;
+            ULONG EndAddress;
+            ULONG HandlerAddress; 
+            ULONG JumpTarget;
+        } ScopeRecord[];
+    } SCOPE_TABLE_AMD64;
+    """
+
+    fields = [
+        ("Count", Num("<I")),
+    ]
+
+class ScopeRecord(MemStruct):
+    fields = [
+        ("BeginAddress", Num("<I")),
+        ("EndAddress", Num("<I")),
+        ("HandlerAddress", Num("<I")),
+        ("JumpTarget", Num("<I")),
+    ]
