@@ -792,6 +792,9 @@ def return_from_seh(jitter):
 
 
 #=============================================================
+CONTEXT64_AD = 0x7FF30000
+EXCEPTION64_RECORD_AD = 0x7FF31000
+DISPATCHER_CONTEXT64_AD = 0x7FF32000
 
 MAX_UNWIND_STEPS = 32
 
@@ -800,12 +803,37 @@ UNW_FLAG_EHANDLER = 0x1
 UNW_FLAG_UHANDLER = 0x2
 UNW_FLAG_CHAININFO = 0x4
 
+# unwind opcodes
+UWOP_PUSH_NONVOL = 0
+UWOP_ALLOC_LARGE = 1
+UWOP_ALLOC_SMALL = 2
+UWOP_SET_FPREG = 3
+UWOP_SAVE_NONVOL = 4
+UWOP_SAVE_NONVOL_FAR = 5
+UWOP_SAVE_XMM128 = 8
+UWOP_SAVE_XMM128_FAR = 9
+UWOP_PUSH_MACHFRAME = 10
+
+
 # general purpose registers table used when reading the OpInfo attribute of 
 # the UnwindCode structure
 GPR_FROM_OPINFO = {
     0: "RAX", 1: "RCX", 2: "RDX", 3: "RBX", 5: "RBP",
     6: "RSI", 7: "RDI", 8: "R8", 9: "R9", 10: "R10", 11: "R11",
     12: "R12", 13: "R13", 14: "R14", 15: "R15",
+}
+
+# values of the FrameRegister attribute of UNWIND_INFO
+# it must be non volatile registers so RAX, RCX, RDX, R8-R11 are excluded
+FRAME_REGISTERS = {
+    3: "RBX",
+    5: "RBP",
+    6: "RSI",
+    7: "RDI",
+    12: "R12",
+    13: "R13",
+    14: "R14",
+    15: "R15",
 }
 
 def regs2ctxt64(jitter, context_address):
@@ -873,6 +901,8 @@ def regs2ctxt64(jitter, context_address):
     ctxt.LastExceptionToRip = 0
     ctxt.LastExceptionFromRip = 0
 
+    return ctxt
+
 
 def ctxt2regs(jitter, ctxt_ptr):
     """
@@ -902,6 +932,15 @@ def ctxt2regs(jitter, ctxt_ptr):
     jitter.cpu.RIP = ctxt.rip
 
 
+#TODO ctxt
+def leaf_unwind_step(jitter, ctxt):
+    """
+    no runtime function entry for the current frame
+    get the return address
+    """
+    ret_addr = upck64(jitter.vm.get_mem(ctxt.RSP, 8))
+    ctxt.RSP += 8
+    return ret_addr
 
 def lookup_function_entry(jitter, rip, pe):
     """
@@ -991,9 +1030,10 @@ def parse_unwind_info(jitter, unwind_rva):
 
 
 
-def virtual_unwind_step(jitter, unwind_info):
+def virtual_unwind_step(jitter, unwind_info, ctx):
     """
     unwind a frame to find the caller
+    update the context
     @jitter: jitter instance
     @unwind_info: parsing of the UNWIND_INFO structure
     """
@@ -1020,20 +1060,25 @@ def virtual_unwind_step(jitter, unwind_info):
             # push reg -> reg = *(RSP) ; RSP += 8
             reg_name = GPR_FROM_OPINFO.get(entry["OpInfo"])
             if reg_name is not None:
-                val = upck64(jitter.vm.get_mem(jitter.cpu.RSP, 8))
-                setattr(jitter.cpu, reg_name, val)
-            jitter.cpu.RSP += 8
+                # val = upck64(jitter.vm.get_mem(jitter.cpu.RSP, 8))
+                val = upck64(jitter.vm.get_mem(ctxt.RSP, 8))
+                # setattr(jitter.cpu, reg_name, val)
+                setattr(ctxt, reg_name, val)
+            # jitter.cpu.RSP += 8
+            ctxt.RSP +=8
             i+=1
 
-        elif op UWOP_ALLOC_SMALL:
+        elif op == UWOP_ALLOC_SMALL:
             # sub rsp, n -> RSP += n
-            jitter.cpu.RSP += entry["OpInfo"] * 8 + 8
+            # jitter.cpu.RSP += entry["OpInfo"] * 8 + 8
+            ctxt.RSP += entry["OpInfo"] * 8 + 8
             i+=1
         
-        elif op UWOP_ALLOC_LARGE:
+        elif op == UWOP_ALLOC_LARGE:
             if entry["OpInfo"] == 0:
                 # check the next slot to recover the size of the allocation
-                jitter.cpu.RSP += unwind_info["UnwindCodes"][i+1]["OpInfo"] * 8
+                # jitter.cpu.RSP += unwind_info["UnwindCodes"][i+1]["OpInfo"] * 8
+                ctxt.RSP += unwind_info["UnwindCodes"][i+1]["OpInfo"] * 8
                 i+=2
 
             elif entry["OpInfo"] == 1 :
@@ -1045,13 +1090,14 @@ def virtual_unwind_step(jitter, unwind_info):
                 hi = unwind_info["UnwindCodes"][i+2]["OpInfo"]
 
                 size = (lo & 0xFFFF) | ((hi & 0xFFFF) << 16)
-                jitter.cpu.RSP += size
+                # jitter.cpu.RSP += size
+                ctxt.RSP += size
                 i+=3
 
         elif op == UWOP_SET_FPREG:
             i+=1
 
-        elif op UWOP_SAVE_NONVOL:
+        elif op == UWOP_SAVE_NONVOL:
             # mov [rsp+Offset], reg 
             reg_name = GPR_FROM_OPINFO.get(entry["OpInfo"])
 
@@ -1059,12 +1105,14 @@ def virtual_unwind_step(jitter, unwind_info):
                 # offset in the next slot
                 offset_scaled = unwind_info["UnwindCodes"][i+1]["OpInfo"]
                 offset = offset_scaled * 8
-                val = upck64(jitter.vm.get_mem(jitter.cpu.RSP + offset, 8))
-                setattr(jitter.cpu, reg_name, val)       
+                # val = upck64(jitter.vm.get_mem(jitter.cpu.RSP + offset, 8))
+                val = upck64(jitter.vm.get_mem(ctxt.RSP + offset, 8))
+                # setattr(jitter.cpu, reg_name, val) 
+                setattr(ctxt, reg_name, val)       
                 
             i+=2
 
-        elif op UWOP_SAVE_NONVOL_FAR:
+        elif op == UWOP_SAVE_NONVOL_FAR:
             # mov [rsp+Offset], reg 
             reg_name = GPR_FROM_OPINFO.get(entry["OpInfo"])
 
@@ -1076,8 +1124,10 @@ def virtual_unwind_step(jitter, unwind_info):
                 # offset in the next slot
                 offset_scaled = unwind_info["UnwindCodes"][i+1]["OpInfo"]
                 offset = offset_scaled * 8
-                val = upck64(jitter.vm.get_mem(jitter.cpu.RSP + offset, 8))
-                setattr(jitter.cpu, reg_name, val)       
+                # val = upck64(jitter.vm.get_mem(jitter.cpu.RSP + offset, 8))
+                val = upck64(jitter.vm.get_mem(ctxt.RSP + offset, 8))
+                # setattr(jitter.cpu, reg_name, val)  
+                setattr(ctxt, reg_name, val)       
                 
             i+=3
 
@@ -1094,12 +1144,41 @@ def virtual_unwind_step(jitter, unwind_info):
             log.error("  UWOP_PUSH_MACHFRAME : not supported")
             return False
 
-    ret_addr = upck64(jitter.vm.get_mem(jitter.cpu.RSP, 8))
-    jitter.cpu.RSP += 8
+    # ret_addr = upck64(jitter.vm.get_mem(jitter.cpu.RSP, 8))
+    ret_addr = upck64(jitter.vm.get_mem(ctxt.RSP, 8))
+    # jitter.cpu.RSP += 8
+    ctxt.RSP += 8
     return ret_addr
 
+def compute_establisher_frame(jitter, unwind_info, rsp_at_entry, ctxt):
+    """
+    The establisher frame is a stack address used to identify the frame of
+    the function which has a handler.
+    Its computed to fill the DispatcherContext structure used to call the handler
 
-def fake_seh_handler64(jitter, exception_code):
+    The handler pass it to RtlUnwindEx as a target frame during the unwind before
+    jumping in the __except bloc... à supprimer TODO
+    """
+    if unwind_info["FrameRegister"] == 0:
+        return rsp_at_entry
+
+    reg_num = unwind_info["FrameRegister"]
+    reg = FRAME_REGISTERS.get(reg_num)
+    frame = getattr(ctxt, reg) - unwind_info["FrameOffset"] * 16
+
+    return frame
+
+def parse_scope_table(jitter, addr):
+    hdr = ScopeTableHeader(jitter.vm, addr)
+    records = []
+    cursor = addr + ScopeTableHeader.sizeof()
+    for _ in range(hdr.Count):
+        rec = ScopeRecord(jitter.vm, cursor)
+        records.append(rec)
+        cursor += ScopeRecord.sizeof()
+    return records
+
+def dispatcher64(jitter, exception_code):
     """
     Create an exception context
     @jitter: jitter instance
@@ -1109,13 +1188,16 @@ def fake_seh_handler64(jitter, exception_code):
     log.info("Exception 0x%X a RIP=0x%X", exception_code, jitter.pc)
 
     # create an exception record
-    rec = ExceptionRecord64(jitter.vm, EXCEPTION_RECORD_AD)
+    rec = ExceptionRecord64(jitter.vm, EXCEPTION64_RECORD_AD)
     rec.memset(b"\x00")
     rec.ExceptionCode = exception_code
     rec.ExceptionAddress = jitter.pc
 
     # save a CONTEXT
-    regs2ctxt64(jitter)
+    ctxt = regs2ctxt64(jitter, CONTEXT64_AD)
+    # copy of the context to work on for the unwind
+    ## TODO je copieça ou ? 
+    copy_ctxt = regs2ctxt64(jitter, )
 
     cur_rip = jitter.pc
     cur_rsp = jitter.cpu.RSP
@@ -1128,7 +1210,7 @@ def fake_seh_handler64(jitter, exception_code):
 
         if rf is None:
             log.info("  frame leaf (rip=0x%X), step back [rsp]", cur_rip)
-            cur_rip = leaf_unwind_step(jitter)
+            cur_rip = leaf_unwind_step(jitter, copy_ctxt)
             continue
 
         unwind_info = parse_unwind_info(jitter, rf.UnwindData)
@@ -1137,50 +1219,108 @@ def fake_seh_handler64(jitter, exception_code):
         if not (unwind_info["Flags"] & UNW_FLAG_EHANDLER):
             # UNW_FLAG_UHANDLER or UNW_FLAG_CHAININFO
             log.info("  no handler in this frame (rip=0x%X), checking the caller", cur_rip)
-            ret = virtual_unwind_step(jitter, unwind_info)
+            ret = virtual_unwind_step(jitter, unwind_info, copy_ctxt)
             if ret is False:
                 return False
             cur_rip = ret
             continue
 
+        ## appeler le handler ??
+        ## signature cf https://github.com/reactos/reactos/blob/master/sdk/include/vcruntime/excpt.h
+        # EXCEPTION_DISPOSITION
+        # __cdecl
+        # __C_specific_handler(
+        #     _In_ struct _EXCEPTION_RECORD *_ExceptionRecord,
+        #     _In_ void *_EstablisherFrame,
+        #     _Inout_ struct _CONTEXT *_ContextRecord,
+        #     _Inout_ struct _DISPATCHER_CONTEXT *_DispatcherContext);
+
+        # the establisher frame is the stack address that identifies the frame
+        # of the function that posesses the handler 
+        frame = compute_establisher_frame()
+
+        dc = DispatcherContext64(jitter.vm, DISPATCHER_CONTEXT64_AD)
+        dc.ControlPc = ctxt.rip
+        dc.ImageBase = image_base = main_pe.NThdr.ImageBase
+        dc.FunctionEntry = function_entry_addr
+        dc.EstablisherFrame = frame
+        dc.TargetIp = 0
+        dc.ContextRecord = CONTEXT64_AD  
+        dc.LanguageHandler = unwind_info["ExceptionHandler"]
+        dc.HandlerData = unwind_info["ScopeTableAddr"]
+        dc.HistoryTable = 0
+        dc.ScopeIndex = 0
+
+        # get space on stack
+        fault_rsp = jitter.cpu.RSP
+        ## ??
+        new_rsp = ((fault_rsp - 0x100) & ~0xf) - 8
+
+        # prepare the arguments
+        jitter.cpu.RCX = EXCEPTION_RECORD64_AD
+        jitter.cpu.RDX = frame
+        jitter.cpu.R8 = CONTEXT64_AD
+        jitter.cpu.R9 = DISPATCHER_CONTEXT64_AD
+        jitter.cpu.RSP = new_rsp
+
+
+        # c'est le job du handler de parser la scope table...
         records = parse_scope_table(jitter, unwind_info["ScopeTableAddr"])
         record = None
+        # find the right record in the scope table
         for rec_i in records:
             if rec_i.BeginAddress <= rva < rec_i.EndAddress:
                 record = rec_i
                 break
 
         if record is None:
-            log.info("  aucune scope record ne couvre rva=0x%X, unwind virtuel", rva)
-            ret = virtual_unwind_step(jitter, unwind_info)
+            log.info("  no scope record for rva=0x%X, unwind", rva)
+            ret = virtual_unwind_step(jitter, unwind_info, copy_ctxt)
             if ret is False:
                 return False
             cur_rip = ret
             continue
 
         if record.HandlerAddress == 1:
-            # __except(EXCEPTION_EXECUTE_HANDLER) en dur, cf. dump reel decode
+            # parfois c'est un nb parfois il faut exec le filtre pr avoir le nb ? 
+            # __except(EXCEPTION_EXECUTE_HANDLER) 
             disposition = EXCEPTION_EXECUTE_HANDLER
         else:
-            log.warning("  filtre reel a 0x%X non emule, EXECUTE_HANDLER force",
+            log.warning("  filter at 0x%X not emulated, EXCEPTION_EXECUTE_HANDLER by default",
                         image_base + record.HandlerAddress)
             disposition = EXCEPTION_EXECUTE_HANDLER
 
         if disposition == EXCEPTION_CONTINUE_SEARCH:
-            # On est toujours dans une frame non-leaf (on a bien une
-            # UNWIND_INFO/scope record ici) -> unwind virtuel, pas leaf_unwind_step.
-            ret = virtual_unwind_step(jitter, unwind_info)
+            ret = virtual_unwind_step(jitter, unwind_info, copy_ctxt)
             if ret is False:
                 return False
             cur_rip = ret
             continue
 
+        # RtlUnwindEx -> RTlpUnwindInternal
+        # https://github.com/reactos/reactos/blob/master/sdk/lib/rtl/amd64/unwind.c#L721
+        # RtlUnwindEx(
+        #     _In_opt_ PVOID TargetFrame,
+        #     _In_opt_ PVOID TargetIp,
+        #     _In_opt_ PEXCEPTION_RECORD ExceptionRecord,
+        #     _In_ PVOID ReturnValue,
+        #     _In_ PCONTEXT ContextRecord,
+        #     _In_opt_ struct _UNWIND_HISTORY_TABLE *HistoryTable)        
+        
         target_ip = image_base + record.JumpTarget
         establisher_frame = compute_establisher_frame(jitter, unwind_info, cur_rsp)
-        log.info("  EXECUTE_HANDLER : unwind -> 0x%X, saut __except=0x%X",
+        log.info("  EXECUTE_HANDLER : unwind -> 0x%X, jump __except=0x%X",
                   establisher_frame, target_ip)
 
-        jitter.cpu.RSP = establisher_frame
+        jitter.cpu.RSP = establisher_frame # insuffisant pr recréer l'environnement
+        #où doit s'exécuter le bloc except il faut unwind
+        # il faut re chercher la runtime function pr le unwindcontext.rip 
+        #(copie du context), pr chaque frame jusqu'à arriver à la targetframe en
+        # en appliquant les unwindcode, 
+        # target frame = establisher frame
+        # donc ensuite je peux juste retablir dans le cpu le contexte simulé
+        # et faire pc = jump target
+        # qd on fait l'unwind ya des handler terminaux à prendre en compte ? 
         jitter.pc = target_ip
         return True
 

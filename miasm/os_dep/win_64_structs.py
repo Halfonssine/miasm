@@ -359,6 +359,58 @@ class UnwindCode(MemStruct):
     ]
 
 
+class DispatcherContext64(MemStruct):
+    """
+    Microsoft documentation
+    typedef struct _DISPATCHER_CONTEXT {
+        ULONG64 ControlPc;
+        ULONG64 ImageBase;
+        PRUNTIME_FUNCTION FunctionEntry;
+        ULONG64 EstablisherFrame;
+        ULONG64 TargetIp;
+        PCONTEXT ContextRecord;
+        PEXCEPTION_ROUTINE LanguageHandler;
+        PVOID HandlerData;
+    } DISPATCHER_CONTEXT, *PDISPATCHER_CONTEXT;
+
+    ReactOS, winnt.h
+    https://doxygen.reactos.org/de/d8d/winnt__old_8h_source.html
+    typedef struct _DISPATCHER_CONTEXT
+    {
+        ULONG64 ControlPc;
+        ULONG64 ImageBase;
+        PRUNTIME_FUNCTION FunctionEntry;
+        ULONG64 EstablisherFrame;
+        ULONG64 TargetIp;
+        struct _CONTEXT *ContextRecord;
+        PEXCEPTION_ROUTINE LanguageHandler;
+        PVOID HandlerData;
+        PUNWIND_HISTORY_TABLE HistoryTable;
+        ULONG ScopeIndex;
+        ULONG Fill0;
+    } DISPATCHER_CONTEXT, *PDISPATCHER_CONTEXT;
+    """
+    fields = [
+        ("ControlPc", Num("<Q")),
+        ("ImageBase", Num("<Q")),
+        ("FunctionEntry", Ptr("<Q", RuntimeFunction)),
+        ("EstablisherFrame", Num("<Q")),
+        ("TargetIp", Num("<Q")),
+        ("ContextRecord", Ptr("<Q", ContextException64)),
+        ("LanguageHandler", Ptr("<Q", Void())),
+        ("HandlerData", Ptr("<Q", Void())),
+        ("HistoryTable", Ptr("<Q", Void())),
+        ("ScopeIndex", Num("<I")),
+        ("Fill0", Num("<I")),
+    ]
+
+
+
+
+
+
+
+
 # SCOPE_TABLE has a ScopeRecord[Count] table of variable size so only the record
 # type is declared to parse the table
 
